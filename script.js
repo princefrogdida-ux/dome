@@ -1,6 +1,6 @@
 const BOARD_SIZE = 15;
 const CELL_COUNT = BOARD_SIZE - 1;
-const PADDING = 30;
+const PADDING = 34;
 const AI_PLAYER = 2;
 const HUMAN_PLAYER = 1;
 
@@ -9,11 +9,14 @@ const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const restartBtn = document.getElementById("restart");
 const modeSelect = document.getElementById("mode");
+const difficultySelect = document.getElementById("difficulty");
+const themeSelect = document.getElementById("theme");
 
 let board = createBoard();
-let currentPlayer = 1; // 1 黑棋, 2 白棋
+let currentPlayer = HUMAN_PLAYER;
 let gameOver = false;
 let isThinking = false;
+let boardColor = themeSelect.value;
 
 function createBoard() {
   return Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(0));
@@ -25,6 +28,8 @@ function drawBoard() {
   const cellSize = gridSize / CELL_COUNT;
 
   ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = boardColor;
+  ctx.fillRect(0, 0, size, size);
 
   for (let i = 0; i < BOARD_SIZE; i += 1) {
     const offset = PADDING + i * cellSize;
@@ -66,7 +71,7 @@ function drawStones(cellSize) {
         radius
       );
 
-      if (stone === 1) {
+      if (stone === HUMAN_PLAYER) {
         gradient.addColorStop(0, "#4b5563");
         gradient.addColorStop(1, "#030712");
       } else {
@@ -151,11 +156,19 @@ function updateStatus(text) {
 }
 
 function getPlayerName(player) {
-  return player === 1 ? "黑棋" : "白棋";
+  return player === HUMAN_PLAYER ? "黑棋" : "白棋";
 }
 
 function getMode() {
   return modeSelect.value;
+}
+
+function getDifficulty() {
+  return difficultySelect.value;
+}
+
+function updateDifficultyAvailability() {
+  difficultySelect.disabled = getMode() !== "pve";
 }
 
 function placeStone(row, col, player) {
@@ -174,10 +187,10 @@ function placeStone(row, col, player) {
     return;
   }
 
-  currentPlayer = player === 1 ? 2 : 1;
+  currentPlayer = player === HUMAN_PLAYER ? AI_PLAYER : HUMAN_PLAYER;
 
   if (getMode() === "pve" && currentPlayer === AI_PLAYER) {
-    updateStatus("电脑思考中...");
+    updateStatus(`电脑(${difficultySelect.options[difficultySelect.selectedIndex].text})思考中...`);
   } else {
     updateStatus(`${getPlayerName(currentPlayer)}回合`);
   }
@@ -248,6 +261,23 @@ function scorePosition(row, col, player) {
   return score;
 }
 
+function evaluateBoardState() {
+  let aiTotal = 0;
+  let humanTotal = 0;
+
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      if (board[row][col] === AI_PLAYER) {
+        aiTotal += scorePosition(row, col, AI_PLAYER);
+      } else if (board[row][col] === HUMAN_PLAYER) {
+        humanTotal += scorePosition(row, col, HUMAN_PLAYER);
+      }
+    }
+  }
+
+  return aiTotal - humanTotal * 0.92;
+}
+
 function isNearbyStone(row, col, distance = 2) {
   for (let r = Math.max(0, row - distance); r <= Math.min(BOARD_SIZE - 1, row + distance); r += 1) {
     for (let c = Math.max(0, col - distance); c <= Math.min(BOARD_SIZE - 1, col + distance); c += 1) {
@@ -283,27 +313,29 @@ function getCandidateMoves() {
   return moves;
 }
 
-function pickBestMove() {
+function scoreMove(row, col) {
+  board[row][col] = AI_PLAYER;
+  const aiWin = hasWinner(row, col, AI_PLAYER);
+  const aiScore = aiWin ? 1_000_000 : scorePosition(row, col, AI_PLAYER);
+  board[row][col] = 0;
+
+  board[row][col] = HUMAN_PLAYER;
+  const humanWin = hasWinner(row, col, HUMAN_PLAYER);
+  const defendScore = humanWin ? 900_000 : scorePosition(row, col, HUMAN_PLAYER);
+  board[row][col] = 0;
+
+  const center = Math.floor(BOARD_SIZE / 2);
+  const centerBias = BOARD_SIZE - 1 - (Math.abs(row - center) + Math.abs(col - center));
+  return aiScore + defendScore * 0.9 + centerBias;
+}
+
+function pickAdvancedMove() {
   const moves = getCandidateMoves();
   let bestMove = moves[0];
   let bestScore = -Infinity;
 
   for (const move of moves) {
-    const { row, col } = move;
-
-    board[row][col] = AI_PLAYER;
-    const aiWin = hasWinner(row, col, AI_PLAYER);
-    const aiScore = aiWin ? 1_000_000 : scorePosition(row, col, AI_PLAYER);
-    board[row][col] = 0;
-
-    board[row][col] = HUMAN_PLAYER;
-    const humanWin = hasWinner(row, col, HUMAN_PLAYER);
-    const defendScore = humanWin ? 900_000 : scorePosition(row, col, HUMAN_PLAYER);
-    board[row][col] = 0;
-
-    const centerBias = 14 - (Math.abs(row - 7) + Math.abs(col - 7));
-    const totalScore = aiScore + defendScore * 0.9 + centerBias;
-
+    const totalScore = scoreMove(move.row, move.col);
     if (totalScore > bestScore) {
       bestScore = totalScore;
       bestMove = move;
@@ -313,17 +345,124 @@ function pickBestMove() {
   return bestMove;
 }
 
+function pickNoviceMove() {
+  const moves = getCandidateMoves();
+  const scored = moves
+    .map((move) => ({ ...move, score: scoreMove(move.row, move.col) }))
+    .sort((a, b) => b.score - a.score);
+
+  const poolSize = Math.min(6, scored.length);
+  const randomIndex = Math.floor(Math.random() * poolSize);
+  return scored[randomIndex];
+}
+
+function minimax(depth, maximizing, alpha, beta) {
+  if (depth === 0 || isBoardFull()) {
+    return evaluateBoardState();
+  }
+
+  const candidates = getCandidateMoves()
+    .map((move) => ({ ...move, score: scoreMove(move.row, move.col) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+
+  if (maximizing) {
+    let maxEval = -Infinity;
+    for (const move of candidates) {
+      board[move.row][move.col] = AI_PLAYER;
+      if (hasWinner(move.row, move.col, AI_PLAYER)) {
+        board[move.row][move.col] = 0;
+        return 2_000_000 + depth;
+      }
+
+      const evalScore = minimax(depth - 1, false, alpha, beta);
+      board[move.row][move.col] = 0;
+
+      maxEval = Math.max(maxEval, evalScore);
+      alpha = Math.max(alpha, evalScore);
+      if (beta <= alpha) {
+        break;
+      }
+    }
+    return maxEval;
+  }
+
+  let minEval = Infinity;
+  for (const move of candidates) {
+    board[move.row][move.col] = HUMAN_PLAYER;
+    if (hasWinner(move.row, move.col, HUMAN_PLAYER)) {
+      board[move.row][move.col] = 0;
+      return -2_000_000 - depth;
+    }
+
+    const evalScore = minimax(depth - 1, true, alpha, beta);
+    board[move.row][move.col] = 0;
+
+    minEval = Math.min(minEval, evalScore);
+    beta = Math.min(beta, evalScore);
+    if (beta <= alpha) {
+      break;
+    }
+  }
+  return minEval;
+}
+
+function pickMasterMove() {
+  const moves = getCandidateMoves()
+    .map((move) => ({ ...move, score: scoreMove(move.row, move.col) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  let bestMove = moves[0];
+  let bestEval = -Infinity;
+
+  for (const move of moves) {
+    board[move.row][move.col] = AI_PLAYER;
+    if (hasWinner(move.row, move.col, AI_PLAYER)) {
+      board[move.row][move.col] = 0;
+      return move;
+    }
+
+    const evalScore = minimax(1, false, -Infinity, Infinity);
+    board[move.row][move.col] = 0;
+
+    if (evalScore > bestEval) {
+      bestEval = evalScore;
+      bestMove = move;
+    }
+  }
+
+  return bestMove;
+}
+
+function pickAiMove() {
+  const difficulty = getDifficulty();
+  if (difficulty === "novice") {
+    return pickNoviceMove();
+  }
+  if (difficulty === "master") {
+    return pickMasterMove();
+  }
+  return pickAdvancedMove();
+}
+
 function runAiTurn() {
   if (gameOver || getMode() !== "pve" || currentPlayer !== AI_PLAYER) {
     return;
   }
 
   isThinking = true;
+  const delayByDifficulty = {
+    novice: 180,
+    advanced: 280,
+    master: 450,
+  };
+
   window.setTimeout(() => {
-    const { row, col } = pickBestMove();
+    const { row, col } = pickAiMove();
     placeStone(row, col, AI_PLAYER);
     isThinking = false;
-  }, 180);
+  }, delayByDifficulty[getDifficulty()] ?? 220);
 }
 
 canvas.addEventListener("click", (event) => {
@@ -354,6 +493,7 @@ function resetGame() {
   currentPlayer = HUMAN_PLAYER;
   gameOver = false;
   isThinking = false;
+  updateDifficultyAvailability();
   updateStatus("黑棋先手");
   drawBoard();
 }
@@ -366,4 +506,16 @@ modeSelect.addEventListener("change", () => {
   resetGame();
 });
 
+difficultySelect.addEventListener("change", () => {
+  if (getMode() === "pve") {
+    resetGame();
+  }
+});
+
+themeSelect.addEventListener("change", () => {
+  boardColor = themeSelect.value;
+  drawBoard();
+});
+
+updateDifficultyAvailability();
 drawBoard();
